@@ -1,0 +1,11 @@
+# User settings
+indicator-settings.json
+
+# Visual Studio / compiler temporary files
+*.obj
+*.pdb
+*.log
+
+# Windows thumbnail cache
+Thumbs.db
+Desktop.ini
