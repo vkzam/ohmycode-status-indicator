@@ -2,6 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -11,6 +14,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Forms;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -18,6 +22,14 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
+
+using Application = System.Windows.Application;
+using Button = System.Windows.Controls.Button;
+using Color = System.Windows.Media.Color;
+using Cursors = System.Windows.Input.Cursors;
+using Image = System.Windows.Controls.Image;
+using Point = System.Windows.Point;
+using Icon = System.Drawing.Icon;
 
 namespace OhMyCodeStatusIndicator {
   public class WindowConfig {
@@ -103,6 +115,7 @@ namespace OhMyCodeStatusIndicator {
     private Button _smallerBtn;
     private Button _widerBtn;
     private Button _collapseBtn;
+    private Button _trayBtn;
     private Ellipse _pulseDot;
     private Border _mainCard;
     private Image _petImage;
@@ -123,6 +136,9 @@ namespace OhMyCodeStatusIndicator {
     private string _currentPetState = "idle";
     private int _currentPetFrameIdx = 0;
 
+    private NotifyIcon _notifyIcon;
+    private Dictionary<string, Icon> _trayIconCache = new Dictionary<string, Icon>();
+
     public MainWindow() {
       Title = "OhMyCode Sessions Indicator";
       MinWidth = 230;
@@ -130,7 +146,7 @@ namespace OhMyCodeStatusIndicator {
       SizeToContent = SizeToContent.Height;
       WindowStyle = WindowStyle.None;
       AllowsTransparency = true;
-      Background = Brushes.Transparent;
+      Background = System.Windows.Media.Brushes.Transparent;
       Topmost = true;
       ShowInTaskbar = false;
       ResizeMode = ResizeMode.NoResize;
@@ -138,6 +154,7 @@ namespace OhMyCodeStatusIndicator {
       LoadWindowConfig();
       Width = Math.Max(MinWidth, Math.Min(MaxWidth, _config.Width));
 
+      InitTrayIcon();
       BuildUI();
       LoadServiceConfig();
 
@@ -154,11 +171,118 @@ namespace OhMyCodeStatusIndicator {
       };
 
       LocationChanged += (s, e) => {
-        if (_isInitialized) SaveWindowConfig();
+        if (_isInitialized && Visibility == Visibility.Visible) SaveWindowConfig();
       };
       SizeChanged += (s, e) => {
-        if (_isInitialized) SaveWindowConfig();
+        if (_isInitialized && Visibility == Visibility.Visible) SaveWindowConfig();
       };
+      Closed += (s, e) => {
+        if (_notifyIcon != null) {
+          _notifyIcon.Visible = false;
+          _notifyIcon.Dispose();
+        }
+      };
+    }
+
+    private void InitTrayIcon() {
+      _notifyIcon = new NotifyIcon();
+      UpdateTrayIcon("idle", "OhMyCode Sessions Indicator: Все сессии завершены");
+      _notifyIcon.Visible = true;
+
+      _notifyIcon.MouseClick += (s, e) => {
+        if (e.Button == MouseButtons.Left) {
+          ToggleTrayShowHide();
+        }
+      };
+
+      var contextMenu = new ContextMenuStrip();
+      var showItem = new ToolStripMenuItem("Показать виджет", null, (s, e) => RestoreFromTray());
+      var hideItem = new ToolStripMenuItem("Свернуть в трей", null, (s, e) => MinimizeToTray());
+      var focusAppItem = new ToolStripMenuItem("Развернуть OhMyCode", null, (s, e) => FocusOhMyCode());
+      var exitItem = new ToolStripMenuItem("Выход", null, (s, e) => {
+        _notifyIcon.Visible = false;
+        Application.Current.Shutdown();
+      });
+
+      contextMenu.Items.Add(showItem);
+      contextMenu.Items.Add(hideItem);
+      contextMenu.Items.Add(new ToolStripSeparator());
+      contextMenu.Items.Add(focusAppItem);
+      contextMenu.Items.Add(new ToolStripSeparator());
+      contextMenu.Items.Add(exitItem);
+
+      _notifyIcon.ContextMenuStrip = contextMenu;
+    }
+
+    private void UpdateTrayIcon(string state, string tooltipText) {
+      try {
+        if (!_trayIconCache.ContainsKey(state)) {
+          System.Drawing.Color circleColor;
+          if (state == "waiting") {
+            circleColor = System.Drawing.Color.FromArgb(255, 65, 95); // Pink/Red
+          } else if (state == "working") {
+            circleColor = System.Drawing.Color.FromArgb(255, 195, 40); // Gold/Yellow
+          } else if (state == "offline") {
+            circleColor = System.Drawing.Color.FromArgb(140, 145, 160); // Gray
+          } else {
+            circleColor = System.Drawing.Color.FromArgb(80, 220, 120); // Green
+          }
+
+          _trayIconCache[state] = CreateCircleIcon(circleColor);
+        }
+
+        _notifyIcon.Icon = _trayIconCache[state];
+        if (!string.IsNullOrEmpty(tooltipText)) {
+          // Tooltip is limited to 63 chars on older win32 APIs, truncate gracefully
+          string tip = tooltipText.Length > 63 ? tooltipText.Substring(0, 60) + "..." : tooltipText;
+          _notifyIcon.Text = tip;
+        }
+      } catch { }
+    }
+
+    private System.Drawing.Icon CreateCircleIcon(System.Drawing.Color fillColor) {
+      using (var bmp = new Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format32bppArgb)) {
+        using (var g = Graphics.FromImage(bmp)) {
+          g.Clear(System.Drawing.Color.Transparent);
+          g.SmoothingMode = SmoothingMode.AntiAlias;
+
+          // Dark outer rim for contrast on any taskbar (light or dark theme)
+          using (var rimBrush = new SolidBrush(System.Drawing.Color.FromArgb(160, 10, 12, 16))) {
+            g.FillEllipse(rimBrush, 2, 2, 28, 28);
+          }
+
+          // Main colored circle
+          using (var brush = new SolidBrush(fillColor)) {
+            g.FillEllipse(brush, 4, 4, 24, 24);
+          }
+
+          // Subtle top-left gloss highlight
+          using (var hlBrush = new SolidBrush(System.Drawing.Color.FromArgb(90, 255, 255, 255))) {
+            g.FillEllipse(hlBrush, 7, 6, 12, 6);
+          }
+        }
+
+        IntPtr hIcon = bmp.GetHicon();
+        return System.Drawing.Icon.FromHandle(hIcon);
+      }
+    }
+
+    private void MinimizeToTray() {
+      Visibility = Visibility.Hidden;
+    }
+
+    private void RestoreFromTray() {
+      Visibility = Visibility.Visible;
+      Activate();
+      Topmost = true;
+    }
+
+    private void ToggleTrayShowHide() {
+      if (Visibility == Visibility.Visible) {
+        MinimizeToTray();
+      } else {
+        RestoreFromTray();
+      }
     }
 
     private void LoadWindowConfig() {
@@ -251,7 +375,7 @@ namespace OhMyCodeStatusIndicator {
         Text = "Подключение к OhMyCode...",
         FontSize = 11.5,
         FontWeight = FontWeights.SemiBold,
-        Foreground = Brushes.White,
+        Foreground = System.Windows.Media.Brushes.White,
         Margin = new Thickness(0, 1, 0, 0),
         TextTrimming = TextTrimming.CharacterEllipsis
       };
@@ -260,8 +384,8 @@ namespace OhMyCodeStatusIndicator {
       Grid.SetColumn(titleStack, 1);
       headerGrid.Children.Add(titleStack);
 
-      // Header buttons (Width -, Width +, Collapse, Focus OhMyCode)
-      var btnStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+      // Header buttons (Width -, Width +, Collapse, Tray, Focus OhMyCode)
+      var btnStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
       _smallerBtn = new Button {
         Content = "◀",
@@ -269,7 +393,7 @@ namespace OhMyCodeStatusIndicator {
         Height = 18,
         FontSize = 9,
         Foreground = new SolidColorBrush(Color.FromRgb(150, 160, 180)),
-        Background = Brushes.Transparent,
+        Background = System.Windows.Media.Brushes.Transparent,
         BorderThickness = new Thickness(0),
         Cursor = Cursors.Hand,
         ToolTip = "Уже (уменьшить ширину на 30px)"
@@ -283,7 +407,7 @@ namespace OhMyCodeStatusIndicator {
         Height = 18,
         FontSize = 9,
         Foreground = new SolidColorBrush(Color.FromRgb(150, 160, 180)),
-        Background = Brushes.Transparent,
+        Background = System.Windows.Media.Brushes.Transparent,
         BorderThickness = new Thickness(0),
         Cursor = Cursors.Hand,
         Margin = new Thickness(1, 0, 3, 0),
@@ -298,13 +422,28 @@ namespace OhMyCodeStatusIndicator {
         Height = 20,
         FontSize = 11,
         Foreground = new SolidColorBrush(Color.FromRgb(170, 180, 200)),
-        Background = Brushes.Transparent,
+        Background = System.Windows.Media.Brushes.Transparent,
         BorderThickness = new Thickness(0),
         Cursor = Cursors.Hand,
         ToolTip = "Свернуть / развернуть список"
       };
       _collapseBtn.Click += (s, e) => ToggleCollapse();
       btnStack.Children.Add(_collapseBtn);
+
+      _trayBtn = new Button {
+        Content = "▼",
+        Width = 20,
+        Height = 20,
+        FontSize = 8.5,
+        Foreground = new SolidColorBrush(Color.FromRgb(170, 180, 200)),
+        Background = System.Windows.Media.Brushes.Transparent,
+        BorderThickness = new Thickness(0),
+        Cursor = Cursors.Hand,
+        Margin = new Thickness(1, 0, 1, 0),
+        ToolTip = "Свернуть в системный трей (кружок со статусом)"
+      };
+      _trayBtn.Click += (s, e) => MinimizeToTray();
+      btnStack.Children.Add(_trayBtn);
 
       var focusBtn = new Button {
         Content = "↗",
@@ -313,7 +452,7 @@ namespace OhMyCodeStatusIndicator {
         FontSize = 12,
         FontWeight = FontWeights.Bold,
         Foreground = new SolidColorBrush(Color.FromRgb(100, 180, 255)),
-        Background = Brushes.Transparent,
+        Background = System.Windows.Media.Brushes.Transparent,
         BorderThickness = new Thickness(0),
         Cursor = Cursors.Hand,
         Margin = new Thickness(2, 0, 0, 0),
@@ -348,7 +487,7 @@ namespace OhMyCodeStatusIndicator {
         FontSize = 9.5,
         Foreground = new SolidColorBrush(Color.FromArgb(130, 140, 150, 170)),
         Margin = new Thickness(0, 5, 0, 0),
-        HorizontalAlignment = HorizontalAlignment.Center
+        HorizontalAlignment = System.Windows.HorizontalAlignment.Center
       };
       Grid.SetRow(_connectionStatusText, 3);
       rootGrid.Children.Add(_connectionStatusText);
@@ -361,7 +500,7 @@ namespace OhMyCodeStatusIndicator {
         Source = TamagotchiSprites.IdleFrames[0],
         Width = 26,
         Height = 34,
-        HorizontalAlignment = HorizontalAlignment.Left,
+        HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
         VerticalAlignment = VerticalAlignment.Top,
         Margin = new Thickness(24, 0, 0, 0),
         Cursor = Cursors.SizeAll
@@ -582,6 +721,7 @@ namespace OhMyCodeStatusIndicator {
             _pulseStoryboard.Stop();
             _waitingStoryboard.Stop();
             SetPetState("idle");
+            UpdateTrayIcon("offline", "OhMyCode: Сервер недоступен");
           }));
         }
       });
@@ -802,26 +942,32 @@ namespace OhMyCodeStatusIndicator {
       int workingCount = items.Count(x => x.Status == "working");
       int idleCount = items.Count(x => x.Status == "idle");
 
-      // Update pet state & header summary & pulse
+      // Update pet state & header summary & pulse & tray icon
       if (waitingCount > 0) {
         SetPetState("waiting");
-        _summaryText.Text = string.Format("{0} {1} ответа!", waitingCount, waitingCount == 1 ? "сессия требует" : "сессии требуют");
+        string sum = string.Format("{0} {1} ответа!", waitingCount, waitingCount == 1 ? "сессия требует" : "сессии требуют");
+        _summaryText.Text = sum;
         _summaryText.Foreground = new SolidColorBrush(Color.FromRgb(255, 110, 130));
         _pulseStoryboard.Stop();
         _waitingStoryboard.Begin();
+        UpdateTrayIcon("waiting", "OhMyCode: " + sum);
       } else if (workingCount > 0) {
         SetPetState("working");
-        _summaryText.Text = string.Format("{0} {1} прямо сейчас", workingCount, workingCount == 1 ? "сессия работает" : "сессии работают");
+        string sum = string.Format("{0} {1} прямо сейчас", workingCount, workingCount == 1 ? "сессия работает" : "сессии работают");
+        _summaryText.Text = sum;
         _summaryText.Foreground = new SolidColorBrush(Color.FromRgb(255, 210, 80));
         _waitingStoryboard.Stop();
         _pulseStoryboard.Begin();
+        UpdateTrayIcon("working", "OhMyCode: " + sum);
       } else {
         SetPetState("idle");
-        _summaryText.Text = string.Format("Все сессии завершены ({0})", items.Count);
+        string sum = string.Format("Все сессии завершены ({0})", items.Count);
+        _summaryText.Text = sum;
         _summaryText.Foreground = new SolidColorBrush(Color.FromRgb(140, 220, 160));
         _pulseStoryboard.Stop();
         _waitingStoryboard.Stop();
         _pulseDot.Fill = new SolidColorBrush(Color.FromRgb(80, 215, 120));
+        UpdateTrayIcon("idle", "OhMyCode: " + sum);
       }
 
       _itemsPanel.Children.Clear();
@@ -832,7 +978,7 @@ namespace OhMyCodeStatusIndicator {
           FontSize = 11,
           Foreground = new SolidColorBrush(Color.FromRgb(140, 145, 160)),
           Margin = new Thickness(0, 6, 0, 6),
-          HorizontalAlignment = HorizontalAlignment.Center
+          HorizontalAlignment = System.Windows.HorizontalAlignment.Center
         };
         _itemsPanel.Children.Add(emptyText);
       } else {
@@ -851,8 +997,8 @@ namespace OhMyCodeStatusIndicator {
     }
 
     private UIElement CreateItemView(SessionData item) {
-      Brush statusBrush;
-      Brush statusBgBrush;
+      System.Windows.Media.Brush statusBrush;
+      System.Windows.Media.Brush statusBgBrush;
 
       if (item.Status == "waiting") {
         statusBrush = new SolidColorBrush(Color.FromRgb(255, 75, 105));
@@ -919,8 +1065,8 @@ namespace OhMyCodeStatusIndicator {
           Text = letter,
           FontSize = 10,
           FontWeight = FontWeights.Bold,
-          Foreground = Brushes.White,
-          HorizontalAlignment = HorizontalAlignment.Center,
+          Foreground = System.Windows.Media.Brushes.White,
+          HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
           VerticalAlignment = VerticalAlignment.Center
         };
         iconElem = badgeBorder;
@@ -934,7 +1080,7 @@ namespace OhMyCodeStatusIndicator {
         Text = item.Title,
         FontSize = 11.5,
         FontWeight = FontWeights.SemiBold,
-        Foreground = Brushes.White,
+        Foreground = System.Windows.Media.Brushes.White,
         TextTrimming = TextTrimming.CharacterEllipsis
       };
       textStack.Children.Add(titleText);
@@ -963,7 +1109,7 @@ namespace OhMyCodeStatusIndicator {
         Margin = new Thickness(6, 0, 0, 0)
       };
 
-      var badgeStack = new StackPanel { Orientation = Orientation.Horizontal };
+      var badgeStack = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
       string label = item.Status == "waiting" ? "● Требует ответа" : (item.Status == "working" ? "● В работе..." : "✓ Завершено");
 
       var badgeText = new TextBlock {
