@@ -1029,7 +1029,7 @@ namespace OhMyCodeStatusIndicator {
         card.BorderBrush = new SolidColorBrush(Color.FromArgb(50, 255, 255, 255));
       };
       card.MouseLeftButtonUp += (s, e) => {
-        FocusOhMyCode();
+        OpenSession(item.SessionId);
       };
 
       var grid = new Grid();
@@ -1136,6 +1136,21 @@ namespace OhMyCodeStatusIndicator {
         return string.IsNullOrEmpty(name) ? dir : name;
       } catch {
         return dir;
+      }
+    }
+
+    private void OpenSession(string sessionId) {
+      if (string.IsNullOrEmpty(sessionId)) {
+        FocusOhMyCode();
+        return;
+      }
+      try {
+        Process.Start(new ProcessStartInfo {
+          FileName = "opencode://session/" + Uri.EscapeDataString(sessionId),
+          UseShellExecute = true
+        });
+      } catch {
+        FocusOhMyCode();
       }
     }
 
