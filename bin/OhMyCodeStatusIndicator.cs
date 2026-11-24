@@ -37,10 +37,12 @@ namespace OhMyCodeStatusIndicator {
     public double Left { get; set; }
     public double Top { get; set; }
     public bool CustomPositioned { get; set; }
+    public List<string> HiddenSessionIds { get; set; }
 
     public WindowConfig() {
       Width = 320;
       CustomPositioned = false;
+      HiddenSessionIds = new List<string>();
     }
   }
 
@@ -198,14 +200,20 @@ namespace OhMyCodeStatusIndicator {
       var contextMenu = new ContextMenuStrip();
       var showItem = new ToolStripMenuItem("Показать виджет", null, (s, e) => RestoreFromTray());
       var hideItem = new ToolStripMenuItem("Свернуть в трей", null, (s, e) => MinimizeToTray());
+      var unhideSessionsItem = new ToolStripMenuItem("Показать скрытые сессии", null, (s, e) => UnhideAllSessions());
       var focusAppItem = new ToolStripMenuItem("Развернуть OhMyCode", null, (s, e) => FocusOhMyCode());
       var exitItem = new ToolStripMenuItem("Выход", null, (s, e) => {
         _notifyIcon.Visible = false;
         Application.Current.Shutdown();
       });
 
+      contextMenu.Opening += (s, e) => {
+        unhideSessionsItem.Visible = (_config.HiddenSessionIds != null && _config.HiddenSessionIds.Count > 0);
+      };
+
       contextMenu.Items.Add(showItem);
       contextMenu.Items.Add(hideItem);
+      contextMenu.Items.Add(unhideSessionsItem);
       contextMenu.Items.Add(new ToolStripSeparator());
       contextMenu.Items.Add(focusAppItem);
       contextMenu.Items.Add(new ToolStripSeparator());
@@ -296,6 +304,9 @@ namespace OhMyCodeStatusIndicator {
           var cfg = _serializer.Deserialize<WindowConfig>(File.ReadAllText(_configPath, Encoding.UTF8));
           if (cfg != null) {
             _config = cfg;
+            if (_config.HiddenSessionIds == null) {
+              _config.HiddenSessionIds = new List<string>();
+            }
           }
         }
       } catch { }
@@ -906,7 +917,28 @@ namespace OhMyCodeStatusIndicator {
         }
       }
 
-      return rootSessions
+      // Auto-unhide any sessions that are no longer idle (now working or waiting)
+      if (_config.HiddenSessionIds != null && _config.HiddenSessionIds.Count > 0) {
+        bool unhiddenAny = false;
+        foreach (var session in rootSessions) {
+          if (session.Status != "idle" && _config.HiddenSessionIds.Contains(session.SessionId)) {
+            _config.HiddenSessionIds.Remove(session.SessionId);
+            unhiddenAny = true;
+          }
+        }
+        if (unhiddenAny) {
+          SaveWindowConfig();
+        }
+      }
+
+      // Filter out hidden sessions (only hidden idle ones remain in HiddenSessionIds)
+      var visibleSessions = rootSessions;
+      if (_config.HiddenSessionIds != null && _config.HiddenSessionIds.Count > 0) {
+        var hiddenSet = new HashSet<string>(_config.HiddenSessionIds);
+        visibleSessions = rootSessions.Where(s => !hiddenSet.Contains(s.SessionId)).ToList();
+      }
+
+      return visibleSessions
         .OrderBy(s => s.Status == "waiting" ? 0 : (s.Status == "working" ? 1 : 2))
         .Take(5)
         .ToList();
@@ -1036,6 +1068,7 @@ namespace OhMyCodeStatusIndicator {
       grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // Project icon
       grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); // Titles
       grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // Status Pill
+      grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto }); // Close / Hide Button
 
       // Project icon or badge
       UIElement iconElem;
@@ -1125,6 +1158,45 @@ namespace OhMyCodeStatusIndicator {
       Grid.SetColumn(badge, 2);
       grid.Children.Add(badge);
 
+      // Hide button (cross)
+      var hideBtn = new Border {
+        Width = 18,
+        Height = 18,
+        CornerRadius = new CornerRadius(9),
+        Background = System.Windows.Media.Brushes.Transparent,
+        VerticalAlignment = VerticalAlignment.Center,
+        Margin = new Thickness(6, 0, 0, 0),
+        Cursor = Cursors.Hand,
+        ToolTip = "Скрыть сессию из виджета (появится при активности)"
+      };
+
+      var hideText = new TextBlock {
+        Text = "×",
+        FontSize = 13,
+        FontWeight = FontWeights.Bold,
+        Foreground = new SolidColorBrush(Color.FromArgb(140, 200, 210, 230)),
+        HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Center,
+        Margin = new Thickness(0, -2, 0, 0)
+      };
+      hideBtn.Child = hideText;
+
+      hideBtn.MouseEnter += (s, e) => {
+        hideBtn.Background = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255));
+        hideText.Foreground = System.Windows.Media.Brushes.White;
+      };
+      hideBtn.MouseLeave += (s, e) => {
+        hideBtn.Background = System.Windows.Media.Brushes.Transparent;
+        hideText.Foreground = new SolidColorBrush(Color.FromArgb(140, 200, 210, 230));
+      };
+      hideBtn.MouseLeftButtonUp += (s, e) => {
+        e.Handled = true;
+        HideSession(item.SessionId);
+      };
+
+      Grid.SetColumn(hideBtn, 3);
+      grid.Children.Add(hideBtn);
+
       card.Child = grid;
       return card;
     }
@@ -1151,6 +1223,26 @@ namespace OhMyCodeStatusIndicator {
         });
       } catch {
         FocusOhMyCode();
+      }
+    }
+
+    private void HideSession(string sessionId) {
+      if (string.IsNullOrEmpty(sessionId)) return;
+      if (_config.HiddenSessionIds == null) {
+        _config.HiddenSessionIds = new List<string>();
+      }
+      if (!_config.HiddenSessionIds.Contains(sessionId)) {
+        _config.HiddenSessionIds.Add(sessionId);
+        SaveWindowConfig();
+        RefreshStatus();
+      }
+    }
+
+    private void UnhideAllSessions() {
+      if (_config.HiddenSessionIds != null && _config.HiddenSessionIds.Count > 0) {
+        _config.HiddenSessionIds.Clear();
+        SaveWindowConfig();
+        RefreshStatus();
       }
     }
 
